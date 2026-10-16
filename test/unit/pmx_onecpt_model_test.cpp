@@ -164,8 +164,11 @@ TEST_F(TorstenOneCptModelTest, ss_bolus_amt_grad) {
     return model.solve(t0, amt_vec[0], rate[cmt-1], ii, cmt);
   };
   std::vector<double> amt_vec{1000.0};
-  cmt = 1; torsten::test::test_grad(f1, f2, amt_vec, 1.e-3, 1.e-16, 2.e-10, 1.e-12);
-  cmt = 2; torsten::test::test_grad(f1, f2, amt_vec, 1.e-3, 1.e-16, 2.e-10, 1.e-12);
+  // The solution is linear in amt, so the finite-difference step has no
+  // truncation error; a unit step keeps the stencil's rounding noise
+  // (about 4e-10 relative at a 1e-3 step) well below the tolerance.
+  cmt = 1; torsten::test::test_grad(f1, f2, amt_vec, 1.0, 1.e-16, 2.e-10, 1.e-12);
+  cmt = 2; torsten::test::test_grad(f1, f2, amt_vec, 1.0, 1.e-16, 2.e-10, 1.e-12);
 
   // compare against textbook analytical sol.
   auto f3 = [&](const std::vector<var>& amt_vec) {
