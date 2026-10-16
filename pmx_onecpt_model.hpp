@@ -2,6 +2,7 @@
 #define STAN_MATH_TORSTEN_ONECPT_MODEL_HPP
 
 #include <stan/math/torsten/pmx_linode_model.hpp>
+#include <stan/math/torsten/pmx_exp_divided_difference.hpp>
 #include <stan/math/torsten/PKModel/functors/check_mti.hpp>
 #include <stan/math/torsten/model_solve_d.hpp>
 #include <stan/math/torsten/dsolve/pmx_ode_integrator.hpp>
@@ -157,6 +158,46 @@ namespace torsten {
     const PMXOneCptODE         & f()       const { return f_;     }
     const int                 & ncmt ()   const { return Ncmt;   }
 
+    /**
+     * Closed-form propagator of the depot/central system
+     *
+     *   y0' = -ka y0 + r0,  y1' = ka y0 - k10 y1 + r1
+     *
+     * over a time span t, for ka > 0. The system matrix is lower
+     * triangular, so its exponential needs no eigendecomposition and
+     * stays well defined when ka == k10, where the matrix has a
+     * repeated eigenvalue and no eigenvector basis.
+     */
+    template<typename T>
+    struct Propagator {
+      T exp_ka;   // exp(-ka t)
+      T exp_k10;  // exp(-k10 t)
+      T d;        // (exp(-k10 t) - exp(-ka t)) / (ka - k10)
+      T int_ka;   // (1 - exp(-ka t)) / ka
+      T int_k10;  // (1 - exp(-k10 t)) / k10
+      T int_d;    // integral of d over [0, t]
+    };
+
+    template<typename Tt>
+    Propagator<stan::return_type_t<T_par, Tt>> propagator(const Tt& t) const {
+      using stan::math::exp;
+      Propagator<stan::return_type_t<T_par, Tt>> p;
+      p.exp_ka = exp(-ka_ * t);
+      p.exp_k10 = exp(-k10_ * t);
+      p.d = internal::pmx_exp_divided_difference(ka_, k10_, t);
+      p.int_ka = internal::pmx_exp_integral(ka_, t);
+      p.int_k10 = internal::pmx_exp_integral(k10_, t);
+      // int_d = (int_k10 - int_ka) / (ka - k10) = (int_k10 - d) / ka
+      // = (int_ka - d) / k10; dividing by the faster rate avoids the
+      // removable singularity and keeps the difference well conditioned.
+      if (ka_ >= k10_) {
+        p.int_d = (p.int_k10 - p.d) / ka_;
+      } else {
+        p.int_d = (p.int_ka - p.d) / k10_;
+      }
+      return p;
+    }
+
     template<typename Tt0, typename Tt1, typename T, typename T1>
     void solve(Eigen::Matrix<T, -1, 1>& y,
                const Tt0& t0, const Tt1& t1,
@@ -168,14 +209,11 @@ namespace torsten {
       Eigen::Matrix<T, -1, 1> pred = torsten::PKRec<T>::Zero(Ncmt);
 
       if (ka_ > 0.0) {
-        Eigen::Matrix<T_par, -1, -1> p(Ncmt, Ncmt), p_inv(Ncmt, Ncmt);
-        Eigen::Matrix<T_par, -1, 1> diag(Ncmt);
-        p << -(ka_ - k10_)/ka_, 0, 1, 1;
-        p_inv << -ka_ / (ka_ - k10_), 0, ka_ / (ka_ - k10_), 1;
-        diag << -ka_, -k10_;
-        LinOdeEigenDecomp<T_par> pdp = std::forward_as_tuple(p, diag, p_inv);
-        PMXLinOdeEigenDecompModel<T_par> linode_model(pdp);
-        linode_model.solve(y, t0, t1, rate, integ);
+        const auto p = propagator(dt);
+        pred(0) = y(0) * p.exp_ka + rate[0] * p.int_ka;
+        pred(1) = y(1) * p.exp_k10 + rate[1] * p.int_k10
+          + ka_ * (y(0) * p.d + rate[0] * p.int_d);
+        y = pred;
       } else {
         typename stan::return_type_t<T_par, Tt0, Tt1> exp1 = exp(-k10_ * dt);
 
@@ -260,11 +298,7 @@ namespace torsten {
     template<typename T_amt, typename T_r, typename T_ii>
     Eigen::Matrix<typename stan::return_type<T_par, T_amt, T_r, T_ii>::type, Eigen::Dynamic, 1>
     solve(double t0, const T_amt& amt, const T_r& rate, const T_ii& ii, int cmt) const { //NOLINT
-      using Eigen::Matrix;
-      using Eigen::Dynamic;
-      using std::vector;
-
-      const double inf = std::numeric_limits<double>::max();  // "infinity"
+      using stan::math::value_of;
 
       stan::math::check_positive_finite("steady state one-cpt solver", "cmt", cmt);
       stan::math::check_less("steady state one-cpt solver", "cmt", cmt, 3);
@@ -273,17 +307,49 @@ namespace torsten {
       using ss_scalar_type = typename stan::return_type_t<T_par, T_amt, T_r, T_ii>;
       PKRec<ss_scalar_type> pred = PKRec<ss_scalar_type>::Zero(Ncmt);
 
-      Eigen::Matrix<T_par, -1, -1> p(Ncmt, Ncmt), p_inv(Ncmt, Ncmt);
-      Eigen::Matrix<T_par, -1, 1> diag(Ncmt);
-      p.setZero();
-      p_inv.setZero();
-      diag.setZero();
-      p << -(ka_ - k10_)/ka_, 0, 1, 1;
-      p_inv << -ka_ / (ka_ - k10_), 0, ka_ / (ka_ - k10_), 1;
-      diag << -ka_, -k10_;
-      LinOdeEigenDecomp<T_par> pdp = std::forward_as_tuple(p, diag, p_inv);
-      PMXLinOdeEigenDecompModel<T_par> linode_model(pdp);
-      pred = linode_model.solve(t0, amt, rate, ii, cmt);
+      if (rate == 0 || ii > 0) {
+        // Periodic steady state u, at the start of a dosing interval:
+        // u = exp(A ii) u + v, with v the amounts one interval's dosing
+        // alone leaves at its end. exp(A ii) is lower triangular, so
+        // (I - exp(A ii)) u = v is solved by forward substitution.
+        const auto p_ii = propagator(ii);
+        PKRec<ss_scalar_type> v = PKRec<ss_scalar_type>::Zero(Ncmt);
+        if (rate == 0) {  // bolus dose
+          if (cmt == 1) {
+            v(0) = amt * p_ii.exp_ka;
+            v(1) = amt * ka_ * p_ii.d;
+          } else {
+            v(1) = amt * p_ii.exp_k10;
+          }
+        } else {  // multiple truncated infusions
+          // Infusions longer than ii overlap: in each interval the rate
+          // is (n + 1) * rate for t1 and n * rate for the remaining t2.
+          typename stan::return_type_t<T_amt, T_r> dt = amt / rate;
+          int n = int(std::floor(value_of(dt) / value_of(ii)) + 0.1);
+          typename stan::return_type_t<T_amt, T_r, T_ii> t1 = dt - n * ii;
+          typename stan::return_type_t<T_amt, T_r, T_ii> t2 = (n + 1) * ii - dt;
+          const auto p1 = propagator(t1);
+          const auto p2 = propagator(t2);
+          if (cmt == 1) {
+            // infuse (n + 1) * rate over t1, evolve over t2 while
+            // infusing n * rate
+            ss_scalar_type w0 = (n + 1) * rate * p1.int_ka;
+            ss_scalar_type w1 = (n + 1) * rate * ka_ * p1.int_d;
+            v(0) = w0 * p2.exp_ka + n * rate * p2.int_ka;
+            v(1) = ka_ * w0 * p2.d + w1 * p2.exp_k10 + n * rate * ka_ * p2.int_d;
+          } else {
+            v(1) = (n + 1) * rate * p1.int_k10 * p2.exp_k10 + n * rate * p2.int_k10;
+          }
+        }
+        // 1 - exp(-k ii) = k * int_k, accurate for small k * ii
+        pred(0) = v(0) / (ka_ * p_ii.int_ka);
+        pred(1) = (v(1) + ka_ * p_ii.d * pred(0)) / (k10_ * p_ii.int_k10);
+      } else {  // constant infusion: u = -A^{-1} rate
+        if (cmt == 1) {
+          pred(0) = rate / ka_;
+        }
+        pred(1) = rate / k10_;
+      }
 
       return pred;
     }
