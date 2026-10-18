@@ -271,10 +271,11 @@ TEST(pmx_solve_dde_rk45, delayed_indirect_response_reference) {
 
 /*
  * Gradients of the delayed indirect-response model with respect to every
- * input that can be a parameter (except the event times, see the class
- * comment of PMXDdeSolver) against finite differences, on a schedule with a
- * lag time on the oral doses, bioavailabilities, a parameter row that changes
- * at the IV bolus, and an infusion.
+ * input that can be a parameter against finite differences, on a schedule
+ * with a lag time on the oral doses, bioavailabilities, a parameter row that
+ * changes at the IV bolus, and an infusion. The event times move the
+ * observations, the doses (and with them their ADDL doses, lagged doses and
+ * the end of the infusion) and the start of the integration.
  */
 TEST(pmx_solve_dde_rk45, delayed_indirect_response_gradients) {
   const schedule s = reference_schedule();
@@ -353,6 +354,40 @@ TEST(pmx_solve_dde_rk45, delayed_indirect_response_gradients) {
                      replace(tlag, {0, 1}, x));
       },
       {0.7, 0.4}, h, tol, "tlag");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return torsten::pmx_solve_dde_rk45(
+            delayed_indirect_response_rhs(), 3, x, s.amt, s.rate, s.ii, s.evid,
+            s.cmt, s.addl, s.ss, theta, to_eigen(tau_ref), to_eigen(y_hist_ref),
+            biovar, tlag, rtol, rtol, 1000000, nullptr);
+      },
+      s.time, h, tol, "time");
+}
+
+/*
+ * Gradients with respect to the event times through a turn-off (EVID 2,
+ * negative CMT), whose jump depends on the state, a reset (EVID 3), after
+ * which the solution depends on the reset time, and a reset with a dose
+ * (EVID 4).
+ */
+TEST(pmx_solve_dde_rk45, event_time_gradients) {
+  schedule s;
+  s.add(0.5, 1, 2, 50);
+  s.observe({3.1, 8.2});
+  s.add(10, 2, -2);
+  s.observe({12.5});
+  s.add(20, 3, 2);
+  s.observe({24.4});
+  s.add(30, 4, 2, 40);
+  s.observe({33.3, 41.7});
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return torsten::pmx_solve_dde_rk45(
+            delayed_indirect_response_rhs(), 3, x, s.amt, s.rate, s.ii, s.evid,
+            s.cmt, s.addl, s.ss, theta_ref, to_eigen(tau_ref),
+            to_eigen(y_hist_ref), 1e-11, 1e-11, 1000000, nullptr);
+      },
+      s.time, 1e-3, 1e-6, "time");
 }
 
 /*

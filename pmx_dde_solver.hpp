@@ -169,9 +169,11 @@ namespace torsten {
           values.col(ikeep) = z.head(n_);
           Eigen::MatrixXd s = Eigen::Map<const Eigen::MatrixXd>(z.data() + n_, n_, p_);
           if (e.time_sensitivities.size() > 0) {
-            // the state at the event moves with the event time
-            s += current_derivative("the time of an event in the schedule")
-                 * e.time_sensitivities.transpose();
+            // the state after the event moves with the event time: its total
+            // derivative is S + f dt/dp, with f the right limit after the
+            // event (equal to S^- + f^- dt/dp before it, by the jump
+            // conditions of the event's actions)
+            s += current_derivative() * e.time_sensitivities.transpose();
           }
           sensitivities.push_back(s);
           ++ikeep;
@@ -244,8 +246,7 @@ namespace torsten {
         }
       }
       if (dt_dtheta.size() > 0) {
-        const double f_c = current_derivative(
-            "the time of an event that turns off or overwrites a compartment")(c);
+        const double f_c = current_derivative()(c);
         for (size_t p = 0; p < p_; ++p) {
           dz.coeffRef(n_ * (1 + p) + c) -= f_c * dt_dtheta.coeff(p);
         }
@@ -254,20 +255,13 @@ namespace torsten {
     }
 
     /**
-     * The derivative of the base state at the current time and state.
-     *
-     * Needs the right hand side with the integrator's own lagged values,
-     * which the DDE core does not expose yet (math snag
-     * dde-retard-integ-a0e8d0a8).
-     *
-     * @param what the input whose gradient needs it, for the error message
+     * The derivative of the base state at the current time and state, with
+     * the integrator's lagged values: the right limit where it jumps, and
+     * before a jump or a change of the right hand side at the current time
+     * the left limit f^- that the jump conditions use.
      */
-    Eigen::VectorXd current_derivative(const std::string& what) const {
-      throw std::invalid_argument(
-          std::string(function_name) + ": the gradient with respect to " + what
-          + " is not available yet: it needs the derivative of the solution "
-            "at the current time from the DDE core (math snag "
-            "dde-retard-integ-a0e8d0a8). Pass that time as data.");
+    Eigen::VectorXd current_derivative() {
+      return integrator_.derivative().head(n_);
     }
 
     /**
