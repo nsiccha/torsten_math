@@ -140,6 +140,59 @@ namespace dsolve {
     }
 
     /**
+     * The residual of an equilibrium x of the current right hand side, whose
+     * history is constant: f(t, x, [x, ..., x]) + rate.
+     */
+    template <typename T>
+    Eigen::Matrix<T, -1, 1> equilibrium_residual(double t,
+                                                 const Eigen::Matrix<T, -1, 1>& x) const {
+      const PMXDdeRhs& rhs = *rhs_;
+      const Eigen::Matrix<T, -1, -1> x_lag = x.replicate(1, d_);
+      Eigen::Matrix<T, -1, 1> res = f_(t, x, x_lag, rhs.theta, *rhs.x_r, *rhs.x_i, msgs_);
+      stan::math::check_size_match("pmx_solve_dde_rk45", "dy_dt", res.size(),
+                                   "nCmt", n_);
+      return res + rhs.rate;
+    }
+
+    /**
+     * Derivatives of the equilibrium residual at x with respect to x
+     * (nCmt x nCmt) and to the global parameters (nCmt x P).
+     */
+    void equilibrium_jacobian(double t, const Eigen::VectorXd& x,
+                              Eigen::MatrixXd& jac_x, Eigen::MatrixXd& jac_p) const {
+      using stan::math::var;
+      const PMXDdeRhs& rhs = *rhs_;
+      stan::math::nested_rev_autodiff nested;
+      Eigen::Matrix<var, -1, 1> y(n_);
+      for (size_t i = 0; i < n_; ++i) {
+        y.coeffRef(i) = x.coeff(i);
+      }
+      // the same variables as y: the history of an equilibrium is constant
+      const Eigen::Matrix<var, -1, -1> y_lag = y.replicate(1, d_);
+      std::vector<var> theta(rhs.theta.begin(), rhs.theta.end());
+      Eigen::Matrix<var, -1, 1> fy = f_(t, y, y_lag, theta, *rhs.x_r, *rhs.x_i, msgs_);
+      stan::math::check_size_match("pmx_solve_dde_rk45", "dy_dt", fy.size(),
+                                   "nCmt", n_);
+      jac_x.resize(n_, n_);
+      jac_p = Eigen::MatrixXd::Zero(n_, p_);
+      for (size_t i = 0; i < n_; ++i) {
+        fy.coeffRef(i).grad();
+        for (size_t j = 0; j < n_; ++j) {
+          jac_x.coeffRef(i, j) = y.coeff(j).adj();
+        }
+        for (size_t k = 0; k < theta.size(); ++k) {
+          if (rhs.theta_index[k] >= 0) {
+            jac_p.coeffRef(i, rhs.theta_index[k]) += theta[k].adj();
+          }
+        }
+        if (rhs.rate_sensitivities.size() > 0) {
+          jac_p.row(i) += rhs.rate_sensitivities.row(i);
+        }
+        nested.set_zero_all_adjoints();
+      }
+    }
+
+    /**
      * The right hand side of the coupled system, in the form
      * <code>dde_retard_integrator</code> calls it.
      */

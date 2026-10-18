@@ -228,6 +228,97 @@ TYPED_TEST_P(test_onecpt, overloads) {
   this -> compare_overload(1.e-4);
 }
 
+TYPED_TEST_P(test_onecpt, multiple_bolus_ss) {
+  // burn-in to the steady state converged below the comparisons (and
+  // within reach of pmx_solve_rk45's Newton solve)
+  this -> as_rtol = 1.e-8;
+  this -> as_atol = 1.e-8;
+  this -> as_max_num_steps = 1000;
+  this -> time[0] = 0.0;
+  this -> time[1] = 0.0;
+  for(int i = 2; i < 10; i++) this -> time[i] = this -> time[i - 1] + 5;
+  this -> amt[0] = 1200;
+  this -> addl[0] = 10;
+  this -> ss[0] = 1;
+
+  Eigen::MatrixXd amounts(10, 2);
+  amounts << 1200.0, 384.7363,
+    1200.0, 384.7363,
+    2.974504, 919.6159,
+    7.373062e-3, 494.0040,
+    3.278849e+1, 1148.4725,
+    8.127454e-2, 634.2335,
+    3.614333e+2, 1118.2043,
+    8.959035e-1, 813.4883,
+    2.220724e-3, 435.9617,
+    9.875702, 1034.7998;
+  Eigen::MatrixXd x = amounts.transpose();
+  this -> compare_rel_val(x, 1.e-6);
+
+  this -> biovar[0] = {0.8, 0.9};
+  this -> compare_solvers_val(1.e-5);
+  this -> compare_solvers_adj(this -> amt, 1.e-6, "AMT");
+  this -> compare_solvers_adj(this -> theta[0], 5.e-6, "theta");
+  this -> compare_solvers_adj(this -> biovar[0], 1.e-6, "bioavailability");
+  this -> compare_solvers_adj(this -> ii, 1.e-6, "II");
+
+  this -> tlag[0][0] = 1.7;
+  this -> compare_solvers_val(1.e-5);
+  this -> compare_solvers_adj(this -> tlag[0], 5.e-7, "lag time");
+}
+
+TYPED_TEST_P(test_onecpt, multiple_infusion_ss) {
+  this -> as_rtol = 1.e-8;
+  this -> as_atol = 1.e-8;
+  this -> as_max_num_steps = 1000;
+  this -> time[0] = 0.0;
+  this -> time[1] = 0.0;
+  for(int i = 2; i < 10; i++) this -> time[i] = this -> time[i - 1] + 5;
+  this -> amt[0] = 1200;
+  this -> rate[0] = 150;
+  this -> addl[0] = 10;
+  this -> ss[0] = 1;
+
+  Eigen::MatrixXd amounts(10, 2);
+  amounts << 1.028649, 659.9385,
+    1.028649, 659.9385,
+    124.692706, 837.1959,
+    11.338982, 836.1947,
+    121.612641, 737.4911,
+    124.991604, 950.4222,
+    87.660547, 642.9529,
+    124.907445, 879.6271,
+    3.415236, 745.2971,
+    123.979747, 789.6393;
+  Eigen::MatrixXd x = amounts.transpose();
+  this -> compare_val(x, 5.e-5);
+  this -> compare_solvers_val(1.e-5);
+  this -> compare_solvers_adj(this -> amt, 1.e-6, "AMT");
+  this -> compare_solvers_adj(this -> rate, 1.e-6, "RATE");
+  this -> compare_solvers_adj(this -> theta[0], 5.e-6, "theta");
+  this -> compare_solvers_adj(this -> ii, 1.e-5, "II");
+
+  this -> tlag[0] = {2.4, 1.7};
+  this -> compare_solvers_val(1.e-5);
+  this -> compare_solvers_adj(this -> amt, 1.e-6, "AMT");
+  this -> compare_solvers_adj(this -> rate, 1.e-6, "RATE");
+  this -> compare_solvers_adj(this -> tlag[0], 5.e-7, "lag time");
+}
+
+TYPED_TEST_P(test_onecpt, constant_infusion_ss) {
+  this -> time[0] = 0.0;
+  for(int i = 1; i < this -> nt; i++) this -> time[i] = this -> time[i - 1] + 2.5;
+  this -> amt[0] = 0.0;
+  this -> rate[0] = 150;
+  this -> ii[0] = 0.0;
+  this -> addl[0] = 0;
+  this -> ss[0] = 1;
+
+  this -> compare_solvers_val(1.e-5);
+  this -> compare_solvers_adj(this -> rate, 1.e-6, "RATE");
+  this -> compare_solvers_adj(this -> theta[0], 1.e-6, "theta");
+}
+
 REGISTER_TYPED_TEST_SUITE_P(test_onecpt,
                             multiple_bolus,
                             multiple_bolus_cent,
@@ -238,7 +329,10 @@ REGISTER_TYPED_TEST_SUITE_P(test_onecpt,
                             time_dependent_theta,
                             reset,
                             turn_off_cmt,
-                            overloads);
+                            overloads,
+                            multiple_bolus_ss,
+                            multiple_infusion_ss,
+                            constant_infusion_ss);
 
 using onecpt_test_types = ::testing::Types<
   std::tuple<pmx_solve_dde_rk45_lag_free_functor, pmx_solve_rk45_functor,

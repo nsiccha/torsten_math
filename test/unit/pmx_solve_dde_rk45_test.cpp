@@ -537,3 +537,200 @@ TEST(pmx_solve_dde_rk45, argument_errors) {
   overlay.addl[0] = 0;
   EXPECT_THROW(solve(overlay, tau, y_hist), std::domain_error);
 }
+
+namespace {
+
+/**
+ * Value and gradient with respect to params of two results agree.
+ */
+void expect_same_solution(Eigen::Matrix<var, -1, -1>& a, int col_a,
+                          Eigen::Matrix<var, -1, -1>& b, int col_b,
+                          std::vector<var>& params, double tol,
+                          const std::string& name) {
+  for (int i = 0; i < a.rows(); ++i) {
+    EXPECT_NEAR(a(i, col_a).val(), b(i, col_b).val(),
+                tol * (1 + std::abs(b(i, col_b).val())))
+        << name << ": value of compartment " << i;
+    stan::math::set_zero_all_adjoints_nested();
+    a(i, col_a).grad();
+    std::vector<double> ga;
+    for (const var& p : params) {
+      ga.push_back(p.adj());
+    }
+    stan::math::set_zero_all_adjoints_nested();
+    b(i, col_b).grad();
+    for (size_t p = 0; p < params.size(); ++p) {
+      EXPECT_NEAR(ga[p], params[p].adj(), tol * (1 + std::abs(params[p].adj())))
+          << name << ": derivative of compartment " << i << " w.r.t. parameter " << p;
+    }
+  }
+}
+
+}  // namespace
+
+/*
+ * A steady-state dose (SS = 1, II > 0) restarts from the steady state of its
+ * regimen: the solution after it, and its gradients, agree with a long
+ * transient run of the same regimen from the history. For an oral bolus
+ * regimen, and for an IV infusion regimen.
+ */
+TEST(pmx_solve_dde_rk45, periodic_steady_state_matches_long_run) {
+  struct regimen {
+    int cmt;
+    double amt, rate, ii;
+  };
+  for (const regimen& r : {regimen{1, 100, 0, 24}, regimen{2, 60, 20, 12}}) {
+    const std::string name = r.rate > 0 ? "infusion" : "bolus";
+    const std::vector<double> ts{201.3, 210.7, 230.2, 247.9, 260.4};
+    schedule ss;
+    ss.add(200, 1, r.cmt, r.amt, r.rate, r.ii, 6, 1);
+    ss.observe(ts);
+    const int periods = 80;
+    schedule transient;
+    transient.add(200 - periods * r.ii, 1, r.cmt, r.amt, r.rate, r.ii, periods + 6);
+    transient.observe(ts);
+
+    stan::math::nested_rev_autodiff nested;
+    std::vector<var> theta(theta_ref.begin(), theta_ref.end());
+    std::vector<var> tau(tau_ref.begin(), tau_ref.end());
+    auto solve = [&](const schedule& s) {
+      return torsten::pmx_solve_dde_rk45(
+          delayed_indirect_response_rhs(), 3, s.time, s.amt, s.rate, s.ii,
+          s.evid, s.cmt, s.addl, s.ss, theta, to_eigen(tau),
+          to_eigen(y_hist_ref), 1e-10, 1e-10, 10000000, 1e-11, 1e-11, 1000,
+          nullptr);
+    };
+    Eigen::Matrix<var, -1, -1> y_ss = solve(ss);
+    Eigen::Matrix<var, -1, -1> y_transient = solve(transient);
+    std::vector<var> params(theta);
+    params.insert(params.end(), tau.begin(), tau.end());
+    for (size_t k = 1; k <= ts.size(); ++k) {
+      expect_same_solution(y_ss, k, y_transient, k, params, 1e-7,
+                           name + " at t = " + std::to_string(ts[k - 1]));
+    }
+  }
+}
+
+/*
+ * A constant-infusion steady state (SS = 1, II = 0) is the equilibrium the
+ * infusion approaches: it agrees, with its gradients, with the state after a
+ * long infusion.
+ */
+TEST(pmx_solve_dde_rk45, constant_infusion_steady_state_matches_long_infusion) {
+  stan::math::nested_rev_autodiff nested;
+  std::vector<var> theta(theta_ref.begin(), theta_ref.end());
+  std::vector<var> tau(tau_ref.begin(), tau_ref.end());
+  var rate = 5.0;
+
+  schedule ss;
+  ss.add(100, 1, 2, 0, 0, 0, 0, 1);
+  std::vector<var> ss_rate{rate};
+  schedule infusion;
+  infusion.add(-1900, 1, 2, 5.0 * 2100);
+  infusion.observe({100});
+  std::vector<var> infusion_rate{rate, 0.0};
+
+  auto solve = [&](const schedule& s, const std::vector<var>& rate) {
+    return torsten::pmx_solve_dde_rk45(
+        delayed_indirect_response_rhs(), 3, s.time, s.amt, rate, s.ii, s.evid,
+        s.cmt, s.addl, s.ss, theta, to_eigen(tau), to_eigen(y_hist_ref),
+        1e-10, 1e-10, 10000000, 1e-12, 1e-12, 1000, nullptr);
+  };
+  Eigen::Matrix<var, -1, -1> y_ss = solve(ss, ss_rate);
+  Eigen::Matrix<var, -1, -1> y_infusion = solve(infusion, infusion_rate);
+  std::vector<var> params(theta);
+  params.insert(params.end(), tau.begin(), tau.end());
+  params.push_back(rate);
+  expect_same_solution(y_ss, 0, y_infusion, 1, params, 1e-7, "equilibrium");
+}
+
+/*
+ * Gradients through the burn-in of steady-state regimens against finite
+ * differences, including the dosing interval, the lag time (which moves the
+ * steady-state dose) and the infusion rate.
+ */
+TEST(pmx_solve_dde_rk45, steady_state_gradients) {
+  schedule s;
+  s.add(0, 1, 1, 100, 0, 24, 2, 1);
+  s.observe({3.3, 11.7, 30.2, 55.1});
+  s.add(60, 1, 2, 60, 20, 12, 1, 1);
+  s.observe({61.4, 66.2, 75.3, 80.0});
+  s.add(90, 1, 2, 0, 5, 0, 0, 1);
+  s.observe({91.7, 99.9});
+  const std::vector<double> biovar{0.8, 0.95, 1.0};
+  const std::vector<double> tlag{0.7, 0.0, 0.0};
+
+  auto solve = [&](const auto& theta_, const auto& tau_, const auto& amt_,
+                   const auto& rate_, const auto& ii_, const auto& biovar_,
+                   const auto& tlag_) {
+    return torsten::pmx_solve_dde_rk45(
+        delayed_indirect_response_rhs(), 3, s.time, amt_, rate_, ii_, s.evid,
+        s.cmt, s.addl, s.ss, theta_, to_eigen(tau_), to_eigen(y_hist_ref),
+        biovar_, tlag_, 1e-11, 1e-11, 10000000, 1e-12, 1e-12, 1000, nullptr);
+  };
+  const double h = 1e-3;
+  const double tol = 1e-6;
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return solve(x, tau_ref, s.amt, s.rate, s.ii, biovar, tlag);
+      },
+      theta_ref, h, tol, "theta");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return solve(theta_ref, x, s.amt, s.rate, s.ii, biovar, tlag);
+      },
+      tau_ref, h, tol, "tau");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return solve(theta_ref, tau_ref, replace(s.amt, {0, 5}, x), s.rate,
+                     s.ii, biovar, tlag);
+      },
+      {100.0, 60.0}, 0.5, tol, "amt");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return solve(theta_ref, tau_ref, s.amt, replace(s.rate, {5, 10}, x),
+                     s.ii, biovar, tlag);
+      },
+      {20.0, 5.0}, 1e-2, tol, "rate");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return solve(theta_ref, tau_ref, s.amt, s.rate, replace(s.ii, {0, 5}, x),
+                     biovar, tlag);
+      },
+      {24.0, 12.0}, 1e-2, tol, "ii");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return solve(theta_ref, tau_ref, s.amt, s.rate, s.ii, x, tlag);
+      },
+      biovar, h, tol, "biovar");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return solve(theta_ref, tau_ref, s.amt, s.rate, s.ii, biovar,
+                     replace(tlag, {0}, x));
+      },
+      {0.7}, h, tol, "tlag");
+}
+
+TEST(pmx_solve_dde_rk45, steady_state_errors) {
+  const Eigen::VectorXd tau = to_eigen(tau_ref), y_hist = to_eigen(y_hist_ref);
+  auto solve = [&](const schedule& s, int as_max_num_steps) {
+    return torsten::pmx_solve_dde_rk45(
+        delayed_indirect_response_rhs(), 3, s.time, s.amt, s.rate, s.ii,
+        s.evid, s.cmt, s.addl, s.ss, theta_ref, tau, y_hist, 1e-8, 1e-8,
+        100000, 1e-10, 1e-10, as_max_num_steps, nullptr);
+  };
+  schedule periodic;
+  periodic.add(0, 1, 1, 100, 0, 24, 0, 1);
+  periodic.observe({5.0});
+  EXPECT_NO_THROW(solve(periodic, 100));
+  // the burn-in reports a steady state it has not reached
+  EXPECT_THROW(solve(periodic, 2), std::domain_error);
+
+  schedule bolus_no_interval;
+  bolus_no_interval.add(0, 1, 1, 100, 0, 0, 0, 1);
+  EXPECT_THROW(solve(bolus_no_interval, 100), std::domain_error);
+
+  schedule infusion_with_amount;
+  infusion_with_amount.add(0, 1, 2, 10, 5, 0, 0, 1);
+  EXPECT_THROW(solve(infusion_with_amount, 100), std::domain_error);
+}

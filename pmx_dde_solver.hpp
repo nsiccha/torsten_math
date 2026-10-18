@@ -2,13 +2,16 @@
 #define STAN_MATH_TORSTEN_PMX_DDE_SOLVER_HPP
 
 #include <stan/math/prim/functor/dde_retard.hpp>
+#include <stan/math/rev/functor/solve_powell.hpp>
 #include <stan/math/prim/err.hpp>
 #include <stan/math/torsten/dsolve/pmx_dde_system.hpp>
 #include <stan/math/torsten/pmx_dde_schedule.hpp>
 #include <Eigen/Dense>
+#include <deque>
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace torsten {
@@ -268,13 +271,218 @@ namespace torsten {
     }
 
     /**
-     * Restart the integration at a steady-state dose from the periodic (or,
-     * for a constant infusion, constant) steady state of its regimen.
+     * Restart the integration at a steady-state dose (SS = 1) from the steady
+     * state of its regimen, the state just before the dose after an infinite
+     * past of the same dose. The bolus part of the dose itself is added by
+     * the caller.
+     *
+     * The right hand side of the regimen is that of the dosing event, with
+     * only the regimen's own infusions; infusions of the regimen still
+     * running at the dose are dropped afterwards, as in Torsten's ODE
+     * solvers. An infusion has rate RATE x F and duration AMT / RATE, as for
+     * transient doses.
      */
     void steady_state(const PMXDdeEvent& e) {
-      throw std::invalid_argument(
-          std::string(function_name)
-          + ": steady-state dosing (SS = 1) is not implemented yet");
+      ss_rhs_ = e.rhs;
+      ss_rhs_.rate.setZero();
+      ss_rhs_.rate_sensitivities.resize(0, 0);
+      if (e.ii > 0) {
+        periodic_steady_state(e);
+      } else if (e.ss_rate > 0) {
+        constant_infusion_steady_state(e);
+      } else {
+        throw std::domain_error(std::string(function_name)
+                                + ": steady-state bolus dosing (SS = 1, RATE = 0) "
+                                  "needs a dosing interval II > 0");
+      }
+    }
+
+    /**
+     * Periodic steady state (II > 0), by burn-in: the regimen is integrated
+     * from the history y_hist for as many dosing periods as it takes the
+     * state at successive doses to agree within as_rtol / as_atol, at most
+     * as_max_num_steps periods.
+     *
+     * The number of periods K is found on the base system, without
+     * sensitivities. The burn-in that is kept integrates the sensitivities
+     * over the K periods that end at the steady-state dose, so that its
+     * history is that of the regimen in the time frame of the schedule, and
+     * the derivatives with respect to the parameters, including the dose
+     * time and the interval, converge together with the state when the
+     * period map contracts.
+     */
+    void periodic_steady_state(const PMXDdeEvent& e) {
+      const int max_periods = controls_.as_max_num_steps;
+      system_t base(f_, n_, p_, delay_sensitivities_, false, controls_.msgs);
+      dsolve::PMXDdeRhs base_rhs = ss_rhs_;
+      base.set_rhs(base_rhs);
+      integrator_t base_integrator(function_name, base, tau_, controls_.rtol,
+                                   controls_.atol, controls_.max_num_steps);
+      const double t_end = e.time + max_periods * e.ii;
+      base_integrator.start(t_end - max_periods * e.ii, y_hist_, y_hist_);
+      Eigen::VectorXd previous = y_hist_;
+      const int periods = regimen(
+          base_integrator, base_rhs, e, t_end, max_periods, false, [&](int) {
+            const Eigen::VectorXd& x = base_integrator.state();
+            const bool converged
+                = ((x - previous).array().abs()
+                   <= controls_.as_atol + controls_.as_rtol * x.array().abs())
+                      .all();
+            previous = x;
+            return converged;
+          });
+      if (periods < 0) {
+        throw std::domain_error(
+            std::string(function_name)
+            + ": the steady state was not reached: the states at successive "
+              "doses still differ by more than as_rtol / as_atol after "
+              "as_max_num_steps = " + std::to_string(max_periods)
+            + " dosing periods (the regimen may not have an attracting "
+              "periodic solution)");
+      }
+
+      system_.set_rhs(ss_rhs_);
+      restart(e.time - periods * e.ii,
+              add_scaled(e.time_sensitivities, -periods, e.ii_sensitivities));
+      regimen(integrator_, ss_rhs_, e, e.time, periods, true,
+              [](int) { return false; });
+    }
+
+    /**
+     * Drive an integrator through n periods of the regimen of a steady-state
+     * dose, with doses at t_end - (n - k) II, k = 0, ..., n - 1, from the
+     * first dose time (where the integrator must be) to t_end.
+     *
+     * @param integrator the integrator
+     * @param rhs the right hand side of the integrator's system, whose rates
+     *   are set here (zero at the start)
+     * @param e the steady-state dosing event
+     * @param t_end end of the last period
+     * @param n number of periods
+     * @param sensitivities whether the system has sensitivities
+     * @param stop called with k at the k-th dose time (before the dose), k =
+     *   1, ..., n; the burn-in stops when it returns true
+     * @return the number of periods after which stop returned true, or -1
+     */
+    template <typename Integrator, typename Stop>
+    int regimen(Integrator& integrator, dsolve::PMXDdeRhs& rhs,
+                const PMXDdeEvent& e, double t_end, int n, bool sensitivities,
+                Stop&& stop) {
+      const int c = e.cmt - 1;
+      int active = 0;
+      // ends of the running infusions, with their time sensitivities
+      std::deque<std::pair<double, Eigen::VectorXd> > ends;
+      auto set_rate = [&](int m) {
+        rhs.rate.coeffRef(c) = m * e.ss_rate;
+        if (sensitivities && e.ss_rate_sensitivities.size() > 0) {
+          rhs.rate_sensitivities = Eigen::MatrixXd::Zero(n_, p_);
+          rhs.rate_sensitivities.row(c) = m * e.ss_rate_sensitivities.transpose();
+        }
+      };
+      auto advance = [&](double t) {
+        while (!ends.empty() && ends.front().first <= t) {
+          integrator.advance_to(ends.front().first);
+          integrator.change_rhs(ends.front().second, [&] { set_rate(--active); });
+          ends.pop_front();
+        }
+        integrator.advance_to(t);
+      };
+      for (int k = 0; k < n; ++k) {
+        const double t = t_end - (n - k) * e.ii;
+        advance(t);
+        if (k > 0 && stop(k)) {
+          return k;
+        }
+        const Eigen::VectorXd dt
+            = sensitivities ? add_scaled(e.time_sensitivities, k - n, e.ii_sensitivities)
+                            : Eigen::VectorXd();
+        if (e.ss_rate == 0) {
+          Eigen::VectorXd dz = Eigen::VectorXd::Zero(integrator.state().size());
+          dz.coeffRef(c) = e.ss_amount;
+          if (sensitivities && e.ss_amount_sensitivities.size() > 0) {
+            for (size_t p = 0; p < p_; ++p) {
+              dz.coeffRef(n_ * (1 + p) + c) = e.ss_amount_sensitivities.coeff(p);
+            }
+          }
+          integrator.jump(dz, dt);
+        } else if (e.ss_duration > 0) {
+          integrator.change_rhs(dt, [&] { set_rate(++active); });
+          ends.emplace_back(t + e.ss_duration,
+                            sensitivities ? add_scaled(dt, 1, e.ss_duration_sensitivities)
+                                          : Eigen::VectorXd());
+        }
+      }
+      advance(t_end);
+      return stop(n) ? n : -1;
+    }
+
+    /**
+     * Steady state of a constant infusion (II = 0): the equilibrium x of
+     * f(t, x, [x, ..., x]) + rate = 0, found from y_hist by Powell's dogleg
+     * method, whose trust region handles a guess far from the equilibrium
+     * (the history is typically the drug-free state), with derivatives from
+     * the implicit function theorem. The history of an equilibrium is
+     * constant, so the integration restarts from it.
+     */
+    void constant_infusion_steady_state(const PMXDdeEvent& e) {
+      if (e.ss_amount > 0) {
+        throw std::domain_error(std::string(function_name)
+                                + ": a constant-infusion steady state (SS = 1, "
+                                  "II = 0, RATE > 0) needs AMT = 0");
+      }
+      const int c = e.cmt - 1;
+      ss_rhs_.rate.coeffRef(c) = e.ss_rate;
+      if (e.ss_rate_sensitivities.size() > 0) {
+        ss_rhs_.rate_sensitivities = Eigen::MatrixXd::Zero(n_, p_);
+        ss_rhs_.rate_sensitivities.row(c) = e.ss_rate_sensitivities.transpose();
+      }
+      system_.set_rhs(ss_rhs_);
+      const double t = e.time;
+      Eigen::VectorXd x;
+      try {
+        x = stan::math::solve_powell_tol(
+            [&](const auto& u, std::ostream* msgs) {
+              return system_.equilibrium_residual(t, u);
+            },
+            y_hist_, controls_.as_rtol, controls_.as_atol,
+            controls_.as_max_num_steps, controls_.msgs);
+      } catch (const std::exception& err) {
+        throw std::domain_error(std::string(function_name)
+                                + ": failed to find the steady state of a "
+                                  "constant infusion: "
+                                + err.what());
+      }
+      Eigen::VectorXd z = Eigen::VectorXd::Zero(n_ * (1 + p_));
+      z.head(n_) = x;
+      if (p_ > 0) {
+        Eigen::MatrixXd jac_x, jac_p;
+        system_.equilibrium_jacobian(t, x, jac_x, jac_p);
+        const Eigen::FullPivLU<Eigen::MatrixXd> lu(jac_x);
+        if (!lu.isInvertible()) {
+          throw std::domain_error(std::string(function_name)
+                                  + ": the steady state of a constant infusion "
+                                    "is not isolated (singular Jacobian)");
+        }
+        const Eigen::MatrixXd s = -lu.solve(jac_p);
+        for (size_t p = 0; p < p_; ++p) {
+          z.segment(n_ * (1 + p), n_) = s.col(p);
+        }
+      }
+      integrator_.start(t, z, z);
+    }
+
+    /**
+     * a + s b for derivative vectors, where an empty vector is zero.
+     */
+    static Eigen::VectorXd add_scaled(const Eigen::VectorXd& a, double s,
+                                      const Eigen::VectorXd& b) {
+      if (b.size() == 0 || s == 0) {
+        return a;
+      }
+      if (a.size() == 0) {
+        return s * b;
+      }
+      return a + s * b;
     }
 
     const F& f_;
@@ -287,6 +495,8 @@ namespace torsten {
     Eigen::VectorXd z_hist_;
     system_t system_;
     integrator_t integrator_;
+    /// right hand side of the regimen of the current steady-state dose
+    dsolve::PMXDdeRhs ss_rhs_;
   };
 
 }

@@ -210,7 +210,17 @@ namespace torsten {
    * y_hist. Bolus doses are jumps of the state, which the integrator lands
    * on; ADDL/II, infusions, lag times and bioavailability are handled by
    * Torsten's event machinery exactly as for <code>pmx_solve_rk45</code>.
-   * Steady-state dosing with SS = 2 is not supported.
+   *
+   * Steady-state dosing (SS = 1) restarts from the steady state of the
+   * dose's regimen. With II > 0 it is found by burn-in: the regimen is
+   * integrated from y_hist until the states at successive doses agree
+   * within as_rtol / as_atol, for at most as_max_num_steps dosing periods
+   * (an error otherwise), and the history before the dose is that of the
+   * last periods. With II = 0 (a constant infusion, AMT = 0) it is the
+   * equilibrium f(t, x, [x, ..., x]) + rate = 0, solved by Powell's method
+   * from y_hist. SS = 2 (adding a steady state to the current state) is
+   * refused: it relies on superposition, which nonlinear systems, and the
+   * history of a DDE, do not have.
    *
    * Gradients are available with respect to every input
    * <code>pmx_solve_rk45</code> accepts as a parameter, and to tau and
