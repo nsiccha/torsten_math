@@ -682,7 +682,7 @@ TEST(pmx_solve_dde_rk45, constant_infusion_steady_state_matches_long_infusion) {
 /*
  * Gradients through the burn-in of steady-state regimens against finite
  * differences, including the dosing interval, the lag time (which moves the
- * steady-state dose) and the infusion rate.
+ * steady-state dose), the infusion rate and the event times.
  */
 TEST(pmx_solve_dde_rk45, steady_state_gradients) {
   schedule s;
@@ -744,6 +744,15 @@ TEST(pmx_solve_dde_rk45, steady_state_gradients) {
                      replace(tlag, {0}, x));
       },
       {0.7}, h, tol, "tlag");
+  expect_gradients_near_fd(
+      [&](const auto& x) {
+        return torsten::pmx_solve_dde_rk45(
+            delayed_indirect_response_rhs(), 3, x, s.amt, s.rate, s.ii, s.evid,
+            s.cmt, s.addl, s.ss, theta_ref, to_eigen(tau_ref),
+            to_eigen(y_hist_ref), biovar, tlag, 1e-11, 1e-11, 10000000, 1e-12,
+            1e-12, 1000, nullptr);
+      },
+      s.time, h, tol, "time");
 }
 
 TEST(pmx_solve_dde_rk45, steady_state_errors) {
