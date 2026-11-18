@@ -44,7 +44,12 @@ namespace torsten {
    */
   template<typename F>
   struct ode_rhs_ostream_adaptor {
-    F const& f;
+    /**
+     * A copy, not a reference: the events solver hands the functor to
+     * <code>model_factory</code> by value, and the model built there keeps
+     * this adaptor beyond that copy's lifetime.
+     */
+    const F f;
 
     ode_rhs_ostream_adaptor(F const& f_) : f(f_) {}
 
