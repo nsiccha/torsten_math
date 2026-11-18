@@ -1,0 +1,360 @@
+{
+  "schema": 1,
+  "line": {
+    "repo": "nsiccha/torsten_math",
+    "ref": "dogfood",
+    "sha": "1bc623ff036f896bf59867fefbc6e59733df29e4"
+  },
+  "upstream": {
+    "repo": "metrumresearchgroup/torsten_math",
+    "ref": "develop",
+    "sha": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a"
+  },
+  "prepared_at": "2026-11-18T11:54:05Z",
+  "problems": [
+    {
+      "id": "onecpt-equal-rates",
+      "role": "fix",
+      "title": "The one-compartment solver returns NaN when ka equals CL/V",
+      "summary": "For a depot bolus, the central amount has a finite limit at equal absorption and elimination rates. The analytical solver lost precision near equality and returned NaNs at equality, including in derivatives and steady state.",
+      "repairs": [],
+      "upstream_refs": [
+        {
+          "url": "https://github.com/metrumresearchgroup/torsten_math/pull/3",
+          "relation": "fixes"
+        }
+      ],
+      "depends_on": [],
+      "requires": [],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "65080ee6695b12b23b7f5bc4f64c2a12907868d1",
+            "title": "onecpt: closed-form solution valid at ka == k10",
+            "original": [
+              "65080ee6695b12b23b7f5bc4f64c2a12907868d1"
+            ]
+          },
+          {
+            "sha": "5e717460aa8810d4539598c016c9296e060842e6",
+            "title": "onecpt test: unit finite-difference step for the amount gradient",
+            "original": [
+              "5e717460aa8810d4539598c016c9296e060842e6"
+            ]
+          }
+        ],
+        "why_together": "The first commit supplies the one-compartment propagator and regression cases. The second keeps an existing steady-state dose-gradient test accurate under the new formula by using a larger finite-difference step for a quantity linear in dose. The open upstream PR includes both."
+      },
+      "validation": [
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/pmx_onecpt_equal_rates_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "At 1bc623ff03, all 10 cases passed, including event tables, near equality, steady state and gradients."
+        }
+      ]
+    },
+    {
+      "id": "compartment-rate-collisions",
+      "role": "fix",
+      "title": "Two-compartment and effect-compartment solvers fail at coincident rates",
+      "summary": "With CL=5, Q=2.5, V2=10 and V3=5, the two disposition rates are 1 and 0.25. Setting ka to either gives nonfinite results. The effect-compartment models have additional singularities, including ka=Q/V3 in the two-compartment effect model.",
+      "repairs": [],
+      "upstream_refs": [
+        {
+          "url": "https://github.com/metrumresearchgroup/torsten_math/pull/3",
+          "relation": "fixes"
+        }
+      ],
+      "depends_on": [
+        "onecpt-equal-rates"
+      ],
+      "requires": [],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "223c4fbeb1aee068da45a2946d3a6ee859da0e37",
+            "title": "cpt models: closed-form solutions valid where rates coincide",
+            "original": [
+              "223c4fbeb1aee068da45a2946d3a6ee859da0e37"
+            ]
+          },
+          {
+            "sha": "b55bfe7c875fc1f582079844770e9f5df2272401",
+            "title": "onecpt test: tolerances at the comparisons' own error floor",
+            "original": [
+              "b55bfe7c875fc1f582079844770e9f5df2272401"
+            ]
+          }
+        ],
+        "why_together": "The first commit extends the divided-difference propagator to the three additional models. The second adjusts inherited one-compartment comparisons for the shared formula’s rounding error. Apply after the one-compartment pair. The October 19 comment on the open PR describes these additional models."
+      },
+      "validation": [
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/pmx_cpt_equal_rates_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "At 1bc623ff03, all 8 cases passed. They compare divided differences and transient and steady-state values and gradients against independent matrix-exponential references."
+        }
+      ]
+    },
+    {
+      "id": "effect-compartment-steady-state",
+      "role": "fix",
+      "title": "The one-compartment effect model gives the wrong steady-state effect amount",
+      "summary": "At distinct rates, an overlapping infusion into the depot can give an effect-compartment amount of 10.80 even though repeated transient infusions converge to 40.50. The steady-state inverse eigenvector matrix had an incorrect last row.",
+      "repairs": [],
+      "upstream_refs": [
+        {
+          "url": "https://github.com/metrumresearchgroup/torsten_math/pull/3",
+          "relation": "fixes"
+        }
+      ],
+      "depends_on": [
+        "onecpt-equal-rates"
+      ],
+      "requires": [],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "223c4fbeb1aee068da45a2946d3a6ee859da0e37",
+            "title": "cpt models: closed-form solutions valid where rates coincide",
+            "original": [
+              "223c4fbeb1aee068da45a2946d3a6ee859da0e37"
+            ]
+          },
+          {
+            "sha": "b55bfe7c875fc1f582079844770e9f5df2272401",
+            "title": "onecpt test: tolerances at the comparisons' own error floor",
+            "original": [
+              "b55bfe7c875fc1f582079844770e9f5df2272401"
+            ]
+          }
+        ],
+        "why_together": "The same shared propagator that handles coincident rates replaces the faulty steady-state solve. Apply this pair once if also taking the rate-collision fix. The open PR’s October 19 comment reports this distinct-rate example explicitly."
+      },
+      "validation": [
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/pmx_cpt_equal_rates_test.cpp — TorstenCptEqualRates.steady_state and steady_state_gradient"
+          ],
+          "result": "passed",
+          "detail": "Both cases passed at 1bc623ff03. The tests include separated rates and compare against an independently computed steady state."
+        }
+      ]
+    },
+    {
+      "id": "pmx-delay-equations",
+      "role": "shared",
+      "title": "Feature: Solve constant-delay equations with Torsten dosing events",
+      "summary": "pmx_solve_dde_rk45 combines Torsten dosing records with constant delays, event-time derivatives and steady-state dosing. Stan Math supplies the integrator and stanc3 recognizes the Stan function. The full infusion repair below also updates this solver’s event schedule.",
+      "repairs": [],
+      "upstream_refs": [],
+      "depends_on": [],
+      "requires": [
+        {
+          "name": "Resumable constant-delay integrator",
+          "repo": "nsiccha/math",
+          "sha": "4ea4783e07cddbd8971ada3d40501b3841f074b4",
+          "why": "Provides the DDE integrator and the derivative accessor used for state jumps."
+        },
+        {
+          "name": "Stan signatures for pmx_solve_dde_rk45",
+          "repo": "nsiccha/stanc3",
+          "sha": "40f93f345a16f7c7c46c24a9c3ab103224853583",
+          "why": "Needed to call the PMX solver from Stan. The C++ tests call the headers directly."
+        }
+      ],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "ddb7c480827d3f07b74a539ca25b94d19a3b959a",
+            "title": "pmx_solve_dde_rk45: PMX DDE solver over the resumable DDE core",
+            "original": [
+              "ddb7c480827d3f07b74a539ca25b94d19a3b959a"
+            ]
+          },
+          {
+            "sha": "939d511d3455dd0a73262e7514bef1b2a887607f",
+            "title": "pmx_solve_dde_rk45: tests of the delayed dynamics",
+            "original": [
+              "939d511d3455dd0a73262e7514bef1b2a887607f"
+            ]
+          },
+          {
+            "sha": "09e8f52ac7c0eef659c8e1865bae733f991cadc7",
+            "title": "pmx_solve_dde_rk45: steady-state dosing (SS = 1)",
+            "original": [
+              "09e8f52ac7c0eef659c8e1865bae733f991cadc7"
+            ]
+          },
+          {
+            "sha": "fc0cd6fec90e76c351fbeb5805139474bc9d4ca0",
+            "title": "pmx_solve_dde_rk45: gradients with respect to event times",
+            "original": [
+              "fc0cd6fec90e76c351fbeb5805139474bc9d4ca0"
+            ]
+          },
+          {
+            "sha": "6873400b179053576de45c30299b764036e6bf9a",
+            "title": "pmx_solve_dde_rk45 test: event-time gradients through steady-state doses",
+            "original": [
+              "6873400b179053576de45c30299b764036e6bf9a"
+            ]
+          }
+        ],
+        "why_together": "These commits add the PMX API and event handling, check delayed dynamics, add steady-state dosing, and propagate and test event-time derivatives. They apply in order on Metrum develop. The entry records the feature as a prerequisite of the complete infusion patch."
+      },
+      "validation": [
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/pmx_solve_dde_rk45_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "All 12 C++ tests passed at 1bc623ff03, including delayed dynamics, sensitivities and steady-state dosing. The Stan compiler was outside this run."
+        }
+      ]
+    },
+    {
+      "id": "infusion-bioavailability",
+      "role": "fix",
+      "title": "Periodic infusions disagree with their steady state when bioavailability differs from one",
+      "summary": "A repeated RATE-defined infusion and the same schedule initialized at steady state give different depot amounts for F=0.8. The two paths deliver the same total dose over different durations.",
+      "repairs": [],
+      "upstream_refs": [],
+      "depends_on": [
+        "pmx-delay-equations"
+      ],
+      "requires": [],
+      "draft": {
+        "title": "RATE-defined infusions with F ≠ 1 disagree with their periodic steady state",
+        "prepared_at": "2026-11-18T11:54:05Z",
+        "body": "For a one-compartment model, give 1200 units into the depot every 12 hours at RATE=150 and F=0.8. Compare the depot amount at time zero after steady-state initialization with a transient schedule started 600 hours earlier. Both schedules give another dose at time zero.\n\n```cpp\n#include <stan/math.hpp>\n#include <iostream>\n\nint main() {\n  using std::vector;\n  auto depot = [](double start, int additional, int steady) {\n    return torsten::pmx_solve_onecpt(\n        vector<double>{start, 0}, vector<double>{1200, 0},\n        vector<double>{150, 0}, vector<double>{12, 0},\n        vector<int>{1, 0}, vector<int>{1, 1},\n        vector<int>{additional, 0}, vector<int>{steady, 0},\n        vector<vector<double>>{{10, 80, 1.2}},\n        vector<vector<double>>{{0.8, 1}}, vector<vector<double>>{{0, 0}})(0, 1);\n  };\n  std::cout << depot(0, 10, 1) << \" \" << depot(-600, 60, 0) << \"\\n\";\n}\n```\n\nOn Metrum develop (`bb8266ea`), this prints `0.150748 0.822919`. The steady-state value should equal the long-run periodic value. Keeping the specified rate of 150 for 6.4 hours gives `0.150748` in both runs. The transient schedule instead delivers 120 units per hour for 8 hours.\n\nThe fix computes an infusion’s end time from `F * AMT / RATE` and preserves the specified rate during that interval, as the steady-state solver already does. Bioavailability then contributes to event-time derivatives. The regression compares repeated dosing with steady state across analytical and numerical solvers."
+      },
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "0c29a8eae200c528e9bb01ae62432211e0e7ecbc",
+            "title": "F on RATE-defined infusions: keep RATE, last F * AMT / RATE (NONMEM)",
+            "original": [
+              "0c29a8eae200c528e9bb01ae62432211e0e7ecbc"
+            ]
+          },
+          {
+            "sha": "7887d98d9e8f65cceea75e645dfdcfb54fe2cfb8",
+            "title": "Coupled solvers keep a step's start-time sensitivity; F tests at kinks",
+            "original": [
+              "7887d98d9e8f65cceea75e645dfdcfb54fe2cfb8"
+            ]
+          }
+        ],
+        "why_together": "The first commit aligns transient and steady-state dosing. The second preserves coupled-solver gradients when an infusion end moves and adjusts finite-difference tests. The complete first commit also updates the DDE solver. To port the schedule alone to upstream develop, apply its diff for ev_history.hpp, ev_manager.hpp, ev_solver.hpp, test/unit/events_test.cpp and test/unit/pmx_ss_biovar_infusion_test.cpp. This five-file subset applies independently of DDE and the analytical repairs."
+      },
+      "validation": [
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "C++ reproducer in the draft"
+          ],
+          "result": "failed",
+          "detail": "Upstream bb8266ea printed 0.150748 at steady state and 0.822919 after repeated dosing."
+        },
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/pmx_ss_biovar_infusion_test.cpp",
+            "C++ reproducer in the draft"
+          ],
+          "result": "passed",
+          "detail": "At 1bc623ff03 the reproducer printed 0.150748 twice and all 9 regression tests passed."
+        },
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/pmx_ss_biovar_infusion_test.cpp",
+            "C++ reproducer in the draft"
+          ],
+          "result": "passed",
+          "detail": "On upstream bb8266ea with just the five-file scheduling patch, the reproducer printed 0.150748 twice and the 9 infusion regression tests passed."
+        }
+      ]
+    },
+    {
+      "id": "coupled-event-time-gradients",
+      "role": "fix",
+      "title": "A lagged dose creates a spurious derivative in the coupled solver",
+      "summary": "A lagged dose splits the integration interval. The coupled solver lost the derivative of the lower endpoint of the following step, giving even an independent constant-slope response a nonzero derivative with respect to the lag.",
+      "repairs": [],
+      "upstream_refs": [],
+      "depends_on": [],
+      "requires": [],
+      "draft": {
+        "title": "pmx_solve_onecpt_rk45 gives a nonzero lag derivative for a response independent of the dose",
+        "prepared_at": "2026-11-18T11:54:05Z",
+        "body": "Add one independent response compartment with initial value zero and derivative 1 to a one-compartment PK model. A depot bolus at time zero is delayed by 0.35 hours. At one hour the response must equal 1 for every lag strictly between 0 and 1, so its derivative with respect to lag must be zero.\n\n```cpp\n#include <stan/math.hpp>\n#include <iostream>\n\nstruct UnitSlope {\n  template <class T, class Y, class PK, class P>\n  auto operator()(const T&, const Y&, const PK&, const P&,\n                  const std::vector<double>&, const std::vector<int>&,\n                  std::ostream*) const {\n    using S = stan::return_type_t<T, typename Y::Scalar, typename PK::Scalar,\n                                  typename P::value_type>;\n    return Eigen::Matrix<S, -1, 1>::Ones(1).eval();\n  }\n};\n\nint main() {\n  using stan::math::var;\n  using std::vector;\n  var lag = 0.35;\n  auto y = torsten::pmx_solve_onecpt_rk45(\n      UnitSlope{}, 1, vector<double>{0, 1}, vector<double>{100, 0},\n      vector<double>{0, 0}, vector<double>{0, 0},\n      vector<int>{1, 0}, vector<int>{1, 1}, vector<int>{0, 0}, vector<int>{0, 0},\n      vector<vector<double>>{{10, 80, 1.2}}, vector<vector<double>>{{1, 1, 1}},\n      vector<vector<var>>{{lag, 0, 0}});\n  y(2, 1).grad();\n  std::cout << y(2, 1).val() << \" \" << lag.adj() << \"\\n\";\n}\n```\n\nOn Metrum develop (`bb8266ea`), this prints `1 1` (response and lag derivative). The expected output is `1 0`. The observation is strictly after the dose, away from the event-time discontinuity.\n\nThe coupled integrator takes the value of the step’s start time and loses its derivative after the lagged event. Integrating to the fixed start plus the differentiable step length `t1 - t0`, and measuring PK elapsed time from that same fixed start, preserves the derivative for this autonomous response. The same step routine serves the one- and two-compartment RK45 and BDF solvers."
+      },
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "7887d98d9e8f65cceea75e645dfdcfb54fe2cfb8",
+            "title": "Coupled solvers keep a step's start-time sensitivity; F tests at kinks",
+            "original": [
+              "7887d98d9e8f65cceea75e645dfdcfb54fe2cfb8"
+            ]
+          }
+        ],
+        "why_together": "This commit applies directly on upstream develop. For the lag-only fix, take pmx_coupled_model.hpp and the additional lag regression in test/unit/coupled_twocpt_typed_test.cpp. The other test changes in the same commit concern the infusion convention. The lag fix does not require DDE or the infusion change."
+      },
+      "validation": [
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "C++ reproducer in the draft"
+          ],
+          "result": "failed",
+          "detail": "Upstream bb8266ea gave response 1 and lag derivative 1."
+        },
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/coupled_twocpt_typed_test.cpp",
+            "C++ reproducer in the draft"
+          ],
+          "result": "passed",
+          "detail": "At 1bc623ff03, all 80 typed tests passed. The constant-slope example gave response 1 and lag derivative 0."
+        },
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 085aaf9585167c60f331a44771e6fe465ab39d50",
+          "tests": [
+            "test/unit/coupled_twocpt_typed_test.cpp",
+            "C++ reproducer in the draft"
+          ],
+          "result": "passed",
+          "detail": "On upstream bb8266ea with just pmx_coupled_model.hpp and its lag regression, the reproducer printed 1 0 and all 80 coupled-solver tests passed."
+        }
+      ]
+    }
+  ]
+}
