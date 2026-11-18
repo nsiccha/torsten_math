@@ -3,14 +3,14 @@
   "line": {
     "repo": "nsiccha/torsten_math",
     "ref": "dogfood",
-    "sha": "1bc623ff036f896bf59867fefbc6e59733df29e4"
+    "sha": "aa2b00e466fd180a1178dd0f67bc48495d7789c5"
   },
   "upstream": {
     "repo": "metrumresearchgroup/torsten_math",
     "ref": "develop",
     "sha": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a"
   },
-  "prepared_at": "2026-11-18T11:54:05Z",
+  "prepared_at": "2026-11-18T19:46:03Z",
   "problems": [
     {
       "id": "onecpt-equal-rates",
@@ -353,6 +353,221 @@
           ],
           "result": "passed",
           "detail": "On upstream bb8266ea with just pmx_coupled_model.hpp and its lag regression, the reproducer printed 1 0 and all 80 coupled-solver tests passed."
+        }
+      ]
+    },
+    {
+      "id": "ode-rhs-functor-lifetime",
+      "role": "fix",
+      "title": "The ODE event model refers to the factory’s local copy of the right-hand side",
+      "summary": "The event factory passes its ODE functor by value. The returned model needs its own copy to keep state such as a rate constant alive during integration.",
+      "repairs": [],
+      "upstream_refs": [],
+      "depends_on": [],
+      "requires": [],
+      "draft": {
+        "title": "The ODE event model refers to the factory’s local copy of the right-hand side",
+        "prepared_at": "2026-11-18T19:46:03Z",
+        "body": "The event model factory takes the ODE right-hand side by value. The model it returns stores an ostream adaptor that refers to the factory's local copy. A stateful right-hand side, such as a decay function carrying a rate constant, therefore loses the object the model needs for the next integration step.\n\nThe following C++ ownership check keeps the original functor alive throughout. Its rate has one owner at construction. An adaptor that stores its own copy gives the rate a second owner.\n\n```cpp\n#include <stan/math/rev.hpp>\n#include <stan/math/torsten/ode_rhs_ostream_adatpor.hpp>\n#include <iostream>\n#include <memory>\n\nstruct Decay {\n  std::shared_ptr<double> k;\n  Eigen::VectorXd operator()(double, const Eigen::VectorXd& y,\n                             const std::vector<double>&,\n                             const std::vector<double>&,\n                             const std::vector<int>&, std::ostream*) const {\n    return -*k * y;\n  }\n};\n\nint main() {\n  Decay rhs{std::make_shared<double>(0.5)};\n  torsten::ode_rhs_ostream_adaptor<Decay> adapted(rhs);\n  std::cout << rhs.k.use_count() << \"\\n\";\n}\n```\n\nMetrum develop at `bb8266ea` prints `1`. Applying `94c7d74` alone makes it print `2`. The change gives the adaptor its own copy of the supplied functor, so it retains the state needed by the model."
+      },
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "94c7d7472379412df5a6dfe6badc20ae3c41113b",
+            "title": "ode_rhs_ostream_adaptor: own the functor instead of referencing it",
+            "original": [
+              "94c7d7472379412df5a6dfe6badc20ae3c41113b"
+            ]
+          }
+        ],
+        "why_together": "This single header change applies directly to Metrum develop. It fixes ownership for the existing ODE interface and is also needed by the new ODE Jacobian overloads."
+      },
+      "validation": [
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "C++ ownership check in the issue draft"
+          ],
+          "result": "failed",
+          "detail": "The rate still had only one owner after constructing the adaptor (expected two)."
+        },
+        {
+          "base": "bb8266ea6bf2eebdc56e1ba82be230e3b4d70a9a",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "C++ ownership check in the issue draft"
+          ],
+          "result": "passed",
+          "detail": "The isolated one-commit port on Metrum develop gave the rate two owners."
+        },
+        {
+          "base": "aa2b00e466fd180a1178dd0f67bc48495d7789c5",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "C++ ownership check in the issue draft"
+          ],
+          "result": "passed",
+          "detail": "The complete dogfood candidate also gave the rate two owners."
+        }
+      ]
+    },
+    {
+      "id": "pmx-ode-rhs-jacobian",
+      "role": "shared",
+      "title": "Supply the RHS Jacobian to the RK45, BDF and Adams ODE solvers",
+      "summary": "Call pmx_solve_rk45, pmx_solve_bdf or pmx_solve_adams with (f, jac, nCmt, …). The integrator can use the supplied derivatives for sensitivities and CVODES can use them for its Newton solve.",
+      "repairs": [],
+      "upstream_refs": [],
+      "depends_on": [
+        "ode-rhs-functor-lifetime"
+      ],
+      "requires": [
+        {
+          "name": "Stan Math Jacobian evaluation and argument-column helpers",
+          "repo": "nsiccha/math",
+          "sha": "371b23da9b19921a2557b18f0e29f9d577c483cf",
+          "why": "The C++ implementation calls these helpers. The tested Math revision includes them."
+        },
+        {
+          "name": "Stan compiler overloads for PMX solvers with a Jacobian",
+          "repo": "nsiccha/stanc3",
+          "sha": "81fad4985775f6f312ebcbb8a2eb75082cdcd846",
+          "why": "Required when calling the overloads from a Stan model. C++ callers use the headers directly."
+        }
+      ],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "6a2f3e35ed3e1dc96982f741f4bee144d6ae77af",
+            "title": "pmx_solve_rk45/bdf/adams: overloads taking the Jacobian of the RHS",
+            "original": [
+              "6a2f3e35ed3e1dc96982f741f4bee144d6ae77af"
+            ]
+          }
+        ],
+        "why_together": "Apply the functor ownership repair first, then this commit for the ODE interfaces, shared Jacobian helpers and ODE tests. This pair applies to Metrum develop independently of the delay-equation changes."
+      },
+      "validation": [
+        {
+          "base": "aa2b00e466fd180a1178dd0f67bc48495d7789c5",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "test/unit/pmx_solve_ode_jacobian_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "All 15 tests passed across the three solvers. They cover transient and steady-state schedules, state and parameter derivatives, data-only theta, and incorrect Jacobians."
+        },
+        {
+          "base": "aa2b00e466fd180a1178dd0f67bc48495d7789c5",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "test/unit/pmx_solve_ode_jacobian_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "All 15 passed when rebuilt with -DSTAN_MATH_CHECK_USER_JACOBIAN, which compares supplied derivatives with nested autodiff."
+        }
+      ]
+    },
+    {
+      "id": "pmx-dde-rhs-jacobian",
+      "role": "shared",
+      "title": "Supply current-state and delayed-state derivatives to the PMX delay solver",
+      "summary": "pmx_solve_dde_rk45(f, jac, nCmt, …) accepts Jacobian blocks for the current state, each delayed state and the parameters. The solver uses them in the sensitivity equations and the equilibrium derivative.",
+      "repairs": [],
+      "upstream_refs": [],
+      "depends_on": [
+        "pmx-delay-equations",
+        "pmx-ode-rhs-jacobian"
+      ],
+      "requires": [],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "ea7e614ef51dbdf74b40e9c998d97c4c830fe10d",
+            "title": "pmx_solve_dde_rk45: overload taking the Jacobian of the RHS",
+            "original": [
+              "ea7e614ef51dbdf74b40e9c998d97c4c830fe10d"
+            ]
+          }
+        ],
+        "why_together": "Apply this commit after the PMX delay solver and the Jacobian helpers from the ODE overloads. It adds the DDE overload and tests for delayed-state derivatives."
+      },
+      "validation": [
+        {
+          "base": "aa2b00e466fd180a1178dd0f67bc48495d7789c5",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "test/unit/pmx_solve_dde_rk45_jacobian_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "All 6 tests passed, including transient, steady-state and data-only parameter cases, feedback on and off, and incorrect Jacobians."
+        },
+        {
+          "base": "aa2b00e466fd180a1178dd0f67bc48495d7789c5",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "test/unit/pmx_solve_dde_rk45_jacobian_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "All 6 passed when rebuilt with -DSTAN_MATH_CHECK_USER_JACOBIAN."
+        }
+      ]
+    },
+    {
+      "id": "pmx-rhs-jacobian-verification",
+      "role": "regression",
+      "title": "Test data-only parameters and benchmark analytic versus autodiff Jacobians",
+      "summary": "One commit adds a value-and-gradient benchmark for the four solvers. The other checks their event sensitivities when theta is data and includes an ODE control that deliberately changes a state derivative.",
+      "repairs": [],
+      "upstream_refs": [],
+      "depends_on": [
+        "pmx-ode-rhs-jacobian",
+        "pmx-dde-rhs-jacobian"
+      ],
+      "requires": [],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "ee25a11da79680592ea9fc91f81d686320db99cc",
+            "title": "Benchmark: pmx_solve_* with the RHS Jacobian against nested autodiff",
+            "original": [
+              "ee25a11da79680592ea9fc91f81d686320db99cc"
+            ]
+          },
+          {
+            "sha": "2c8fee2c3592fc8db688ceea6b08baf6622d0b25",
+            "title": "Jacobian-overload tests: theta as data",
+            "original": [
+              "2c8fee2c3592fc8db688ceea6b08baf6622d0b25"
+            ]
+          }
+        ],
+        "why_together": "These are independent verification additions for the two interfaces. Either can be taken after both implementations. The benchmark measures performance and the regression tests check correctness."
+      },
+      "validation": [
+        {
+          "base": "aa2b00e466fd180a1178dd0f67bc48495d7789c5",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "test/unit/pmx_solve_ode_jacobian_test.cpp",
+            "test/unit/pmx_solve_dde_rk45_jacobian_test.cpp"
+          ],
+          "result": "passed",
+          "detail": "Data-only parameter cases passed for all four solvers in the ordinary and Jacobian-check builds."
+        },
+        {
+          "base": "aa2b00e466fd180a1178dd0f67bc48495d7789c5",
+          "native_build": "GCC 15.2.0, C++17, -O1, nsiccha/math at 4012d968c6059b9c31f88e25eefbdc8173fccdd6",
+          "tests": [
+            "test/benchmark/pmx_solve_jacobian_benchmark.cpp"
+          ],
+          "result": "not-run",
+          "detail": "The publication check reran the correctness tests only. The benchmark source and its original measurements are in ee25a11."
         }
       ]
     }
