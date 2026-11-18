@@ -124,12 +124,14 @@ struct twocpt_ir_jac_stream_third {
 
 /**
  * A Jacobian that counts its evaluations, scaling the theta column
- * <code>column</code> (if nonnegative) by <code>factor</code>.
+ * <code>column</code> (if nonnegative) by <code>factor</code>, and the
+ * state column <code>state_column</code> (if nonnegative) too.
  */
 struct counting_jac {
   int* count;
   int column = -1;
   double factor = 1.0;
+  int state_column = -1;
   Eigen::MatrixXd operator()(double t, const Eigen::VectorXd& y,
                              const std::vector<double>& theta,
                              const std::vector<double>& x_r,
@@ -139,6 +141,9 @@ struct counting_jac {
     Eigen::MatrixXd J = twocpt_ir_jac()(t, y, theta, x_r, x_i, msgs);
     if (column >= 0) {
       J.col(4 + column) *= factor;
+    }
+    if (state_column >= 0) {
+      J.col(state_column) *= factor;
     }
     return J;
   }
@@ -286,7 +291,8 @@ void values_and_jacobian(const Solve& solve, const problem& p,
 template <typename SolveAD, typename SolveJac>
 void expect_jacobian_path_matches(const SolveAD& solve_ad, const SolveJac& solve_jac,
                                   const problem& p, double tol,
-                                  const std::string& name) {
+                                  const std::string& name,
+                                  double min_nonzero_fraction = 0.5) {
   Eigen::VectorXd values_ad, values_jac;
   Eigen::MatrixXd jac_ad, jac_jac;
   values_and_jacobian(solve_ad, p, values_ad, jac_ad);
@@ -311,7 +317,7 @@ void expect_jacobian_path_matches(const SolveAD& solve_ad, const SolveJac& solve
   for (Eigen::Index k = 0; k < jac_ad.cols(); ++k) {
     nonzero_inputs += jac_ad.col(k).cwiseAbs().maxCoeff() > 1e-8;
   }
-  EXPECT_GT(nonzero_inputs, jac_ad.cols() / 2) << name;
+  EXPECT_GT(nonzero_inputs, min_nonzero_fraction * jac_ad.cols()) << name;
   std::cout << name << ": " << jac_ad.rows() << " values x " << jac_ad.cols()
             << " inputs (" << nonzero_inputs << " with nonzero derivatives), "
             << "largest relative difference " << max_diff << "\n";
@@ -467,4 +473,43 @@ TYPED_TEST(pmx_solve_ode_jacobian, wrong_jacobian) {
   EXPECT_GT(std::abs(wrong - right), 1e-3 * std::abs(right));
 #endif
   EXPECT_THROW(solve_d_ka(short_jac()), std::invalid_argument);
+}
+
+/*
+ * theta as data, the event inputs as autodiff variables: the argument
+ * columns the solver reads are then only those of the infusion rates.
+ */
+TYPED_TEST(pmx_solve_ode_jacobian, data_theta) {
+  const problem p = transient_problem();
+  auto data_theta = [&p](const auto& solve) {
+    return [&p, solve](const auto& theta, const auto&... rest) {
+      return solve(p.theta, rest...);
+    };
+  };
+  int count = 0;
+  expect_jacobian_path_matches(
+      data_theta(full_solve<TypeParam>(p)),
+      data_theta(full_solve<TypeParam>(p, counting_jac{&count})), p, 1e-6,
+      std::string(TypeParam::name) + " data theta", 0.1);
+  EXPECT_GT(count, 0) << "the Jacobian overload never evaluated jac";
+
+  // positive control: the state block of jac drives the sensitivities to
+  // the doses (scaling d/d central changes d response / d amt)
+  auto d_response_d_amt = [&](const auto& jac) {
+    stan::math::nested_rev_autodiff nested;
+    std::vector<var> amt(p.amt.begin(), p.amt.end());
+    auto y = TypeParam()(twocpt_ir_rhs(), jac, 4, p.time, amt, p.rate, p.ii,
+                         p.evid, p.cmt, p.addl, p.ss, p.theta, p.biovar, p.tlag,
+                         ode_rtol, ode_atol, max_num_steps, nullptr);
+    y(3, 10).grad();
+    return amt[0].adj();
+  };
+  const counting_jac scaled{&count, -1, 1.5, 1};
+#ifdef STAN_MATH_CHECK_USER_JACOBIAN
+  EXPECT_THROW(d_response_d_amt(scaled), std::domain_error);
+#else
+  const double right = d_response_d_amt(counting_jac{&count});
+  const double wrong = d_response_d_amt(scaled);
+  EXPECT_GT(std::abs(wrong - right), 1e-3 * std::abs(right));
+#endif
 }

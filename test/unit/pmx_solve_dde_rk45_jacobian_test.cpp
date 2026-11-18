@@ -291,7 +291,8 @@ void values_and_jacobian(const Solve& solve, const problem& p,
 template <typename SolveAD, typename SolveJac>
 void expect_jacobian_path_matches(const SolveAD& solve_ad, const SolveJac& solve_jac,
                                   const problem& p, double tol,
-                                  const std::string& name) {
+                                  const std::string& name,
+                                  double min_nonzero_fraction = 0.5) {
   Eigen::VectorXd values_ad, values_jac;
   Eigen::MatrixXd jac_ad, jac_jac;
   values_and_jacobian(solve_ad, p, values_ad, jac_ad);
@@ -316,7 +317,7 @@ void expect_jacobian_path_matches(const SolveAD& solve_ad, const SolveJac& solve
   for (Eigen::Index k = 0; k < jac_ad.cols(); ++k) {
     nonzero_inputs += jac_ad.col(k).cwiseAbs().maxCoeff() > 1e-8;
   }
-  EXPECT_GT(nonzero_inputs, jac_ad.cols() / 2) << name;
+  EXPECT_GT(nonzero_inputs, min_nonzero_fraction * jac_ad.cols()) << name;
   std::cout << name << ": " << jac_ad.rows() << " values x " << jac_ad.cols()
             << " inputs (" << nonzero_inputs << " with nonzero derivatives), "
             << "largest relative difference " << max_diff << "\n";
@@ -453,4 +454,22 @@ TEST(pmx_solve_dde_rk45_jacobian, wrong_jacobian) {
   EXPECT_GT(std::abs(wrong - right), 1e-3 * std::abs(right));
 #endif
   EXPECT_THROW(solve_d_kin(short_jac()), std::invalid_argument);
+}
+
+/*
+ * theta as data, the other inputs as autodiff variables: no theta column
+ * of the Jacobian is read.
+ */
+TEST(pmx_solve_dde_rk45_jacobian, data_theta) {
+  const problem p = transient_problem();
+  auto data_theta = [&p](const auto& solve) {
+    return [&p, solve](const auto& theta, const auto&... rest) {
+      return solve(p.theta, rest...);
+    };
+  };
+  int count = 0;
+  expect_jacobian_path_matches(data_theta(full_solve(p)),
+                               data_theta(full_solve(p, counting_jac{&count})),
+                               p, 1e-6, "pmx_solve_dde_rk45 data theta", 0.1);
+  EXPECT_GT(count, 0) << "the Jacobian overload never evaluated jac";
 }
